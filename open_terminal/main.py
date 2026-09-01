@@ -950,7 +950,13 @@ async def replace_lines(
             )
 
     # Build the replacement. Empty new_content deletes the range.
-    new_lines = request.new_content.splitlines(keepends=True) if request.new_content else []
+    # Detect the file's dominant line terminator so inserted lines match
+    # the surrounding file (CRLF vs LF) and never merge into the next line.
+    term = "\r\n" if any(ln.endswith("\r\n") for ln in lines) else "\n"
+    if request.new_content:
+        new_lines = [ln + term for ln in request.new_content.splitlines()]
+    else:
+        new_lines = []
     lines[start:end] = new_lines
     updated = "".join(lines)
 
