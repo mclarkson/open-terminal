@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from open_terminal.env import API_KEY, BINARY_FILE_MIME_PREFIXES, CORS_ALLOWED_ORIGINS, ENABLE_NOTEBOOKS, ENABLE_SYSTEM_PROMPT, ENABLE_TERMINAL, EXECUTE_DESCRIPTION, EXECUTE_TIMEOUT, FILE_BROWSER_ROOT, LOG_DIR, MAX_TERMINAL_SESSIONS, MULTI_USER, OPEN_TERMINAL_INFO, PROCESS_LOG_RETENTION, SESSION_CWD_TTL, SYSTEM_PROMPT, TERMINAL_TERM
+from open_terminal.env import API_KEY, BINARY_FILE_MIME_PREFIXES, CORS_ALLOWED_ORIGINS, ENABLE_NOTEBOOKS, ENABLE_SYSTEM_PROMPT, ENABLE_TERMINAL, EXECUTE_DESCRIPTION, EXECUTE_TIMEOUT, FILE_BROWSER_ROOT, LOG_DIR, MAX_TERMINAL_SESSIONS, MULTI_USER, OPEN_TERMINAL_INFO, PROCESS_LOG_RETENTION, SESSION_CWD_TTL, SYSTEM_PROMPT, TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_TERM
 from open_terminal.utils.runner import PipeRunner, ProcessRunner, create_runner
 from open_terminal.utils.fs import UserFS
 
@@ -1971,7 +1971,7 @@ if ENABLE_TERMINAL:
                 )
 
             try:
-                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", TERMINAL_ROWS, TERMINAL_COLS, 0, 0))
 
                 fs = get_filesystem(request)
 
@@ -1980,9 +1980,13 @@ if ENABLE_TERMINAL:
                 session_cwd = _get_session_cwd(session_id, fs) if session_id else None
 
                 if fs.username:
+                    # `sudo -i` starts a login shell that resets the
+                    # environment, which wipes the TERM we set below. Re-export
+                    # it inside the spawned command so pagers (less) see a
+                    # usable terminal type instead of empty/unknown/dumb.
                     shell_cmd = [
                         "script", "-qc",
-                        f"sudo -i -u {fs.username}",
+                        f'sudo -i -u {fs.username} && export TERM={TERMINAL_TERM}',
                         "/dev/null",
                     ]
                     cwd = session_cwd or fs.home

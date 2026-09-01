@@ -76,6 +76,19 @@ TERMINAL_TERM = os.environ.get(
     config.get("term", "xterm-256color"),
 )
 
+# Default pty geometry for spawned shells. A wide-enough width avoids the
+# line-wrapping that fragments long output (e.g. git log) into many short
+# chunks, which is a common trigger for terminal desync.
+TERMINAL_ROWS = int(os.environ.get(
+    "OPEN_TERMINAL_TERMINAL_ROWS",
+    config.get("terminal_rows", 50),
+))
+
+TERMINAL_COLS = int(os.environ.get(
+    "OPEN_TERMINAL_TERMINAL_COLS",
+    config.get("terminal_cols", 200),
+))
+
 EXECUTE_TIMEOUT: float | None = None
 _execute_timeout = os.environ.get(
     "OPEN_TERMINAL_EXECUTE_TIMEOUT",
