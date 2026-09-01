@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- New LLM-exposed endpoint `/files/replace-lines` (`operation_id="replace_lines"`) for deterministic line-range edits. It replaces lines `[start_line..end_line]` with `new_content`, supporting block replace, insert-before (single-line range), and delete (empty `new_content`). An optional `expect` field acts as a drift guard: if provided, the edit aborts when the live file's lines differ from `expect`, protecting against stale line numbers that previously caused subtle corruption.
+
 ## [0.12.3] - 2026-08-27
 
 ### Added

@@ -327,6 +327,31 @@ class ReplaceRequest(BaseModel):
     )
 
 
+class ReplaceLinesRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description="Path to the file to modify.",
+    )
+    start_line: int = Field(
+        ...,
+        ge=1,
+        description="First line to replace (1-indexed, inclusive).",
+    )
+    end_line: int = Field(
+        ...,
+        ge=1,
+        description="Last line to replace (1-indexed, inclusive).",
+    )
+    new_content: str = Field(
+        "",
+        description="Replacement text for the range. An empty string deletes the range.",
+    )
+    expect: Optional[str] = Field(
+        None,
+        description="Optional expected current content of lines [start_line..end_line]. When provided, the edit aborts if the live file's lines differ, protecting against stale line numbers.",
+    )
+
+
 
 # ---------------------------------------------------------------------------
 # Background process management
@@ -842,6 +867,93 @@ async def replace_file_content(http_request: Request, request: ReplaceRequest, f
         raise HTTPException(status_code=400, detail=str(e))
 
     return {"path": target, "size": len(content.encode())}
+
+
+@app.post(
+    "/files/replace-lines",
+    operation_id="replace_lines",
+    summary="Replace a line range in a file",
+    description=(
+        "Replace lines [start_line..end_line] with new_content. Supports "
+        "block replace, insert-before, and delete (empty new_content). "
+        "If expect is provided, the edit aborts when the live file's lines "
+        "differ from expect, guarding against stale line numbers."
+    ),
+    dependencies=[Depends(verify_api_key)],
+    responses={
+        404: {"description": "File not found."},
+        400: {"description": "Invalid line range or expectation mismatch."},
+        401: {"description": "Invalid or missing API key."},
+    },
+)
+async def replace_lines(
+    http_request: Request,
+    request: ReplaceLinesRequest,
+    fs: UserFS = Depends(get_filesystem),
+):
+    session_id = http_request.headers.get("x-session-id")
+    session_cwd = _get_session_cwd(session_id, fs) if session_id else None
+    target = fs.resolve_path(request.path, cwd=session_cwd)
+    if not await fs.isfile(target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        content = await fs.read_text(target)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    lines = content.splitlines(keepends=True)
+
+    # Validate the requested range against the live file length.
+    if request.end_line < request.start_line:
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_line ({request.end_line}) must be >= start_line ({request.start_line})",
+        )
+    if request.start_line > len(lines) + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_line {request.start_line} exceeds file length {len(lines)} (+1 for append)",
+        )
+    if request.end_line > len(lines):
+        raise HTTPException(
+            status_code=400,
+            detail=f"end_line {request.end_line} exceeds file length {len(lines)}",
+        )
+
+    start = request.start_line - 1  # 0-indexed lower bound
+    end = request.end_line          # exclusive upper bound
+
+    # Drift guard: verify the live lines still match the caller's expectation.
+    if request.expect is not None:
+        current_block = "".join(lines[start:end])
+        if current_block != request.expect:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Expectation mismatch: lines [{request.start_line}..{request.end_line}] "
+                    f"differ from `expect`. Re-read the file, refresh the line "
+                    f"numbers, and retry.\n--- expected ---\n{request.expect}\n"
+                    f"--- actual ---\n{current_block}"
+                ),
+            )
+
+    # Build the replacement. Empty new_content deletes the range.
+    new_lines = request.new_content.splitlines(keepends=True) if request.new_content else []
+    lines[start:end] = new_lines
+    updated = "".join(lines)
+
+    try:
+        await fs.write(target, updated)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "path": target,
+        "replaced_range": [request.start_line, request.end_line],
+        "inserted_lines": len(new_lines),
+        "new_total_lines": len(lines),
+    }
 
 
 @app.get(
