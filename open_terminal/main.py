@@ -953,8 +953,19 @@ async def replace_lines(
     # Detect the file's dominant line terminator so inserted lines match
     # the surrounding file (CRLF vs LF) and never merge into the next line.
     term = "\r\n" if any(ln.endswith("\r\n") for ln in lines) else "\n"
+    # Does the file currently end with a newline? Preserve that property:
+    # if it doesn't, don't introduce one when editing the tail.
+    file_ends_nl = bool(lines) and lines[-1].endswith(term)
     if request.new_content:
-        new_lines = [ln + term for ln in request.new_content.splitlines()]
+        logical = request.new_content.splitlines()
+        replaces_tail = request.end_line >= len(lines)  # touching the last line
+        new_lines = []
+        for i, ln in enumerate(logical):
+            last = (i == len(logical) - 1)
+            if not (last and replaces_tail and not file_ends_nl):
+                new_lines.append(ln + term)
+            else:
+                new_lines.append(ln)  # keep tail bare if file had no trailing NL
     else:
         new_lines = []
     lines[start:end] = new_lines
