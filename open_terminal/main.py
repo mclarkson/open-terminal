@@ -926,15 +926,26 @@ async def replace_lines(
 
     # Drift guard: verify the live lines still match the caller's expectation.
     if request.expect is not None:
-        current_block = "".join(lines[start:end])
-        if current_block != request.expect:
+        # Compare LOGICAL lines, ignoring line-terminator style (CRLF vs LF)
+        # so the guard doesn't false-positive on terminator-only differences.
+        current_logical = [ln.rstrip("\r\n") for ln in lines[start:end]]
+        expect_logical = [ln.rstrip("\r\n") for ln in request.expect.splitlines()]
+        if current_logical != expect_logical:
+            def _diff(a, b):
+                out = []
+                for i in range(max(len(a), len(b))):
+                    av = a[i] if i < len(a) else None
+                    bv = b[i] if i < len(b) else None
+                    mark = "  " if av == bv else "!="
+                    out.append(f"{mark} expected={av!r} actual={bv!r}")
+                return "\n".join(out)
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Expectation mismatch: lines [{request.start_line}..{request.end_line}] "
-                    f"differ from `expect`. Re-read the file, refresh the line "
-                    f"numbers, and retry.\n--- expected ---\n{request.expect}\n"
-                    f"--- actual ---\n{current_block}"
+                    f"differ from `expect` (compared as logical lines, terminators ignored). "
+                    f"Re-read the file, refresh the line numbers, and retry.\n"
+                    + _diff(expect_logical, current_logical)
                 ),
             )
 
