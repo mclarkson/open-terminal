@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Uploa
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from open_terminal.env import API_KEY, BINARY_FILE_MIME_PREFIXES, CORS_ALLOWED_ORIGINS, ENABLE_NOTEBOOKS, ENABLE_SYSTEM_PROMPT, ENABLE_TERMINAL, EXECUTE_DESCRIPTION, EXECUTE_TIMEOUT, FILE_BROWSER_ROOT, LOG_DIR, MAX_TERMINAL_SESSIONS, MULTI_USER, OPEN_TERMINAL_INFO, PROCESS_LOG_RETENTION, SESSION_CWD_TTL, SYSTEM_PROMPT, TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_TERM
 from open_terminal.utils.runner import PipeRunner, ProcessRunner, create_runner
@@ -296,6 +296,17 @@ class ReplacementChunk(BaseModel):
         False,
         description="If true, replaces all occurrences. If false, errors when multiple matches are found.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_key_aliases(cls, data):
+        """Accept legacy spellings: old_text -> target, new_text -> replacement."""
+        if isinstance(data, dict):
+            if "target" not in data and "old_text" in data:
+                data["target"] = data["old_text"]
+            if "replacement" not in data and "new_text" in data:
+                data["replacement"] = data["new_text"]
+        return data
 
 
 class MkdirRequest(BaseModel):
@@ -813,7 +824,7 @@ async def move_entry(request: MoveRequest, fs: UserFS = Depends(get_filesystem))
     "/files/replace",
     operation_id="replace_file_content",
     summary="Replace content in a file",
-    description="Find and replace exact strings in a file. Supports multiple replacements in one call with optional line range narrowing.",
+    description="Find and replace exact strings in a file. Supports multiple replacements in one call with optional line range narrowing. Legacy key aliases are accepted: `old_text` (for `target`) and `new_text` (for `replacement`).",
     dependencies=[Depends(verify_api_key)],
     responses={
         404: {"description": "File not found."},
