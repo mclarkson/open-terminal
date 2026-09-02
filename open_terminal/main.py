@@ -752,7 +752,7 @@ async def serve_file(path: str, fs: UserFS = Depends(get_filesystem)):
 async def write_file(http_request: Request, request: WriteRequest, fs: UserFS = Depends(get_filesystem)):
     session_id = http_request.headers.get("x-session-id")
     session_cwd = _get_session_cwd(session_id, fs) if session_id else None
-    session_cwd = _get_session_cwd(session_id, fs) if session_id else None
+    target = fs.resolve_path(request.path, cwd=session_cwd)
     try:
         await fs.write(target, request.content)
     except (OSError, subprocess.CalledProcessError) as e:
