@@ -4,11 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [This Fork]
 
 ### Added
 
 - New LLM-exposed endpoint `/files/replace-lines` (`operation_id="replace_lines"`) for deterministic line-range edits. It replaces lines `[start_line..end_line]` with `new_content`, supporting block replace, insert-before (single-line range), and delete (empty `new_content`). An optional `expect` field acts as a drift guard: if provided, the edit aborts when the live file's lines differ from `expect`, protecting against stale line numbers that previously caused subtle corruption.
+- The `/files/replace` tool now accepts legacy key aliases `old_text` (for `target`) and `new_text` (for `replacement`), so models trained on those spellings can use them without rewording.
+
+### Fixed
+
+- `replace_lines` no longer merges the last inserted line into the next existing line. Inserted lines are now given the file's dominant line terminator (CRLF or LF) detected from the surrounding lines, so multi-line `new_content` without a trailing newline no longer glues onto the following line.
+- `replace_lines` now preserves whether the file ends with a trailing newline: when replacing the last line(s) of a file that has no trailing newline, the last inserted line is left bare instead of introducing a newline some linters/parsers reject.
 
 ## [0.12.3] - 2026-08-27
 
