@@ -752,11 +752,12 @@ async def serve_file(path: str, fs: UserFS = Depends(get_filesystem)):
 async def write_file(http_request: Request, request: WriteRequest, fs: UserFS = Depends(get_filesystem)):
     session_id = http_request.headers.get("x-session-id")
     session_cwd = _get_session_cwd(session_id, fs) if session_id else None
-    target = fs.resolve_path(request.path, cwd=session_cwd)
+    session_cwd = _get_session_cwd(session_id, fs) if session_id else None
     try:
         await fs.write(target, request.content)
     except (OSError, subprocess.CalledProcessError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _post_edit_check(fs, target)
     return {"path": target, "size": len(request.content.encode())}
 
 
@@ -820,6 +821,53 @@ async def move_entry(request: MoveRequest, fs: UserFS = Depends(get_filesystem))
     return {"source": source, "destination": destination}
 
 
+
+
+# ---------------------------------------------------------------------------
+# Post-edit syntax check
+# ---------------------------------------------------------------------------
+def _detect_checker(path: str) -> list[str] | None:
+    """Return the checker command for the file at *path*, or None."""
+    base = os.path.basename(path).lower()
+    ext = os.path.splitext(path)[1].lower()
+
+    if base == "makefile" or ext in (".mk", ".make"):
+        return ["make", "-f", path, "-n"]
+    if ext == ".py":
+        return ["python3", "-m", "py_compile", path]
+    if ext == ".go":
+        return ["gofmt", path]
+    if ext in (".sh", ".bash"):
+        return ["shellcheck", path]
+    return None
+
+
+async def _post_edit_check(fs, target: str) -> None:
+    """Run a language-appropriate syntax check after an edit.
+
+    Raises HTTPException(400) if the check fails with a real syntax error.
+    Silently skips when no checker is available or the failure is environmental
+    (e.g. missing include file for make).
+    """
+    cmd = _detect_checker(target)
+    if cmd is None:
+        return
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        log.warning("post-edit check skipped for %s: %s", target, exc)
+        return
+
+    if r.returncode != 0:
+        # make -n can fail because an included .mk file is absent — that's
+        # an environment issue, not a syntax bug; skip silently.
+        if cmd[0] == "make" and "No such file" in (r.stderr or ""):
+            return
+        detail = (r.stderr or r.stdout or "").strip()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Post-edit syntax check failed for {target}:\n{detail}",
+        )
 @app.post(
     "/files/replace",
     operation_id="replace_file_content",
@@ -876,10 +924,8 @@ async def replace_file_content(http_request: Request, request: ReplaceRequest, f
         await fs.write(target, content)
     except OSError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
+    await _post_edit_check(fs, target)
     return {"path": target, "size": len(content.encode())}
-
-
 @app.post(
     "/files/replace-lines",
     operation_id="replace_lines",
@@ -986,6 +1032,7 @@ async def replace_lines(
         await fs.write(target, updated)
     except OSError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _post_edit_check(fs, target)
 
     return {
         "path": target,

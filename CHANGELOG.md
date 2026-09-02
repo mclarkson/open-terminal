@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - New LLM-exposed endpoint `/files/replace-lines` (`operation_id="replace_lines"`) for deterministic line-range edits. It replaces lines `[start_line..end_line]` with `new_content`, supporting block replace, insert-before (single-line range), and delete (empty `new_content`). An optional `expect` field acts as a drift guard: if provided, the edit aborts when the live file's lines differ from `expect`, protecting against stale line numbers that previously caused subtle corruption.
 - The `/files/replace` tool now accepts legacy key aliases `old_text` (for `target`) and `new_text` (for `replacement`), so models trained on those spellings can use them without rewording.
+- Post-edit syntax check: after `write_file`, `replace_file_content`, and `replace_lines`, the server runs a language-appropriate checker — `python3 -m py_compile` (.py), `gofmt` (.go), `shellcheck` (.sh/.bash), or `make -f <file> -n` (Makefile/*.mk). A failed check returns HTTP 400 with the checker output, turning silent corruption into a loud, recoverable error. Missing-include failures in Makefiles are treated as environmental and skipped.
 
 ### Fixed
 
