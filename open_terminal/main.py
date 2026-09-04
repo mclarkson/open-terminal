@@ -865,6 +865,11 @@ async def replace_file_content(http_request: Request, request: SimpleReplaceRequ
         raise HTTPException(status_code=400, detail=str(e))
 
     for chunk in request.replacements:
+        if not chunk.target:
+            raise HTTPException(
+                status_code=400,
+                detail="Target string must not be empty",
+            )
         if chunk.start_line or chunk.end_line:
             lines = content.splitlines(keepends=True)
             start = (chunk.start_line or 1) - 1
