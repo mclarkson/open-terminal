@@ -273,40 +273,23 @@ class WriteRequest(BaseModel):
     )
 
 
-class ReplacementChunk(BaseModel):
-    target: str = Field(
+class SimpleReplaceRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description="Path to the file to modify.",
+    )
+    old_text: str = Field(
         ...,
         description="Exact string to find. Must match precisely, including whitespace.",
     )
-    replacement: str = Field(
+    new_text: str = Field(
         ...,
         description="Content to replace the target with.",
-    )
-    start_line: Optional[int] = Field(
-        None,
-        description="Narrow the search to lines at or after this (1-indexed).",
-        ge=1,
-    )
-    end_line: Optional[int] = Field(
-        None,
-        description="Narrow the search to lines at or before this (1-indexed).",
-        ge=1,
     )
     allow_multiple: bool = Field(
         False,
         description="If true, replaces all occurrences. If false, errors when multiple matches are found.",
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_key_aliases(cls, data):
-        """Accept legacy spellings: old_text -> target, new_text -> replacement."""
-        if isinstance(data, dict):
-            if "target" not in data and "old_text" in data:
-                data["target"] = data["old_text"]
-            if "replacement" not in data and "new_text" in data:
-                data["replacement"] = data["new_text"]
-        return data
 
 
 class MkdirRequest(BaseModel):
@@ -324,17 +307,6 @@ class MoveRequest(BaseModel):
     destination: str = Field(
         ...,
         description="Destination path (new location).",
-    )
-
-
-class ReplaceRequest(BaseModel):
-    path: str = Field(
-        ...,
-        description="Path to the file to modify.",
-    )
-    replacements: list[ReplacementChunk] = Field(
-        ...,
-        description="List of find-and-replace operations to apply sequentially.",
     )
 
 
@@ -872,7 +844,7 @@ async def _post_edit_check(fs, target: str) -> None:
     "/files/replace",
     operation_id="replace_file_content",
     summary="Replace content in a file",
-    description="Find and replace exact strings in a file. Supports multiple replacements in one call with optional line range narrowing. Legacy key aliases are accepted: `old_text` (for `target`) and `new_text` (for `replacement`).",
+    description="Find and replace exact strings in a file. Supports multiple replacements in one call.",
     dependencies=[Depends(verify_api_key)],
     responses={
         404: {"description": "File not found."},
@@ -880,7 +852,7 @@ async def _post_edit_check(fs, target: str) -> None:
         401: {"description": "Invalid or missing API key."},
     },
 )
-async def replace_file_content(http_request: Request, request: ReplaceRequest, fs: UserFS = Depends(get_filesystem)):
+async def replace_file_content(http_request: Request, request: SimpleReplaceRequest, fs: UserFS = Depends(get_filesystem)):
     session_id = http_request.headers.get("x-session-id")
     session_cwd = _get_session_cwd(session_id, fs) if session_id else None
     target = fs.resolve_path(request.path, cwd=session_cwd)
@@ -929,23 +901,24 @@ async def replace_file_content(http_request: Request, request: ReplaceRequest, f
 @app.post(
     "/files/replace-lines",
     operation_id="replace_lines",
-    summary="Replace a line range in a file",
+    summary="Replace a line in a file",
     description=(
-        "Replace lines [start_line..end_line] with new_content. Supports "
-        "block replace, insert-before, and delete (empty new_content). "
-        "If expect is provided, the edit aborts when the live file's lines "
-        "differ from expect, guarding against stale line numbers."
+        "Replace a single line at *line_number* with *new_content*. "
+        "Supports block replace by passing multi-line text. "
+        "Set *new_content* to empty string to delete the line. "
+        "If *expect* is provided, the edit aborts when the live line differs, "
+        "guarding against stale line numbers."
     ),
     dependencies=[Depends(verify_api_key)],
     responses={
         404: {"description": "File not found."},
-        400: {"description": "Invalid line range or expectation mismatch."},
+        400: {"description": "Invalid line number or expectation mismatch."},
         401: {"description": "Invalid or missing API key."},
     },
 )
 async def replace_lines(
     http_request: Request,
-    request: ReplaceLinesRequest,
+    request: SimpleReplaceLinesRequest,
     fs: UserFS = Depends(get_filesystem),
 ):
     session_id = http_request.headers.get("x-session-id")
@@ -961,71 +934,49 @@ async def replace_lines(
 
     lines = content.splitlines(keepends=True)
 
-    # Validate the requested range against the live file length.
-    if request.end_line < request.start_line:
+    # Validate the requested line against the live file length.
+    if request.line_number > len(lines) + 1:
         raise HTTPException(
             status_code=400,
-            detail=f"end_line ({request.end_line}) must be >= start_line ({request.start_line})",
-        )
-    if request.start_line > len(lines) + 1:
-        raise HTTPException(
-            status_code=400,
-            detail=f"start_line {request.start_line} exceeds file length {len(lines)} (+1 for append)",
-        )
-    if request.end_line > len(lines):
-        raise HTTPException(
-            status_code=400,
-            detail=f"end_line {request.end_line} exceeds file length {len(lines)}",
+            detail=f"line_number {request.line_number} exceeds file length {len(lines)} (+1 for append)",
         )
 
-    start = request.start_line - 1  # 0-indexed lower bound
-    end = request.end_line          # exclusive upper bound
+    idx = request.line_number - 1  # 0-indexed
 
-    # Drift guard: verify the live lines still match the caller's expectation.
-    if request.expect is not None:
-        # Compare LOGICAL lines, ignoring line-terminator style (CRLF vs LF)
-        # so the guard doesn't false-positive on terminator-only differences.
-        current_logical = [ln.rstrip("\r\n") for ln in lines[start:end]]
-        expect_logical = [ln.rstrip("\r\n") for ln in request.expect.splitlines()]
-        if current_logical != expect_logical:
-            def _diff(a, b):
-                out = []
-                for i in range(max(len(a), len(b))):
-                    av = a[i] if i < len(a) else None
-                    bv = b[i] if i < len(b) else None
-                    mark = "  " if av == bv else "!="
-                    out.append(f"{mark} expected={av!r} actual={bv!r}")
-                return "\n".join(out)
+    # Drift guard: verify the live line still matches the caller's expectation.
+    if request.expect is not None and idx < len(lines):
+        current_line = lines[idx].rstrip("\r\n")
+        expect_line = request.expect.rstrip("\r\n")
+        if current_line != expect_line:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Expectation mismatch: lines [{request.start_line}..{request.end_line}] "
-                    f"differ from `expect` (compared as logical lines, terminators ignored). "
-                    f"Re-read the file, refresh the line numbers, and retry.\n"
-                    + _diff(expect_logical, current_logical)
+                    f"Expectation mismatch: line {request.line_number} differs from `expect`. "
+                    f"expected={expect_line!r} actual={current_line!r}. "
+                    f"Re-read the file, refresh the line number, and retry."
                 ),
             )
 
-    # Build the replacement. Empty new_content deletes the range.
     # Detect the file's dominant line terminator so inserted lines match
     # the surrounding file (CRLF vs LF) and never merge into the next line.
     term = "\r\n" if any(ln.endswith("\r\n") for ln in lines) else "\n"
-    # Does the file currently end with a newline? Preserve that property:
-    # if it doesn't, don't introduce one when editing the tail.
+    # Does the file currently end with a newline? Preserve that property.
     file_ends_nl = bool(lines) and lines[-1].endswith(term)
+
     if request.new_content:
         logical = request.new_content.splitlines()
-        replaces_tail = request.end_line >= len(lines)  # touching the last line
+        replaces_tail = request.line_number > len(lines)  # appending after last line
         new_lines = []
         for i, ln in enumerate(logical):
             last = (i == len(logical) - 1)
             if not (last and replaces_tail and not file_ends_nl):
                 new_lines.append(ln + term)
             else:
-                new_lines.append(ln)  # keep tail bare if file had no trailing NL
+                new_lines.append(ln)
     else:
         new_lines = []
-    lines[start:end] = new_lines
+
+    lines[idx:idx+1] = new_lines
     updated = "".join(lines)
 
     try:
@@ -1036,7 +987,7 @@ async def replace_lines(
 
     return {
         "path": target,
-        "replaced_range": [request.start_line, request.end_line],
+        "replaced_line": request.line_number,
         "inserted_lines": len(new_lines),
         "new_total_lines": len(lines),
     }

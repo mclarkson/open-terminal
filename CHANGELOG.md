@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [This Fork]
 
+### Changed
+
+- 🔧 **Simplified `replace_file_content` and `replace_lines` schemas** — removed nested `ReplacementChunk` / `ReplaceRequest` and range-based `ReplaceLinesRequest` models that caused LLM JSON-generation failures in Open WebUI. Both tools now use flat parameters directly on the request body (`path`, `old_text`, `new_text` for replace; `path`, `line_number`, `new_content` for replace-lines). This eliminates the deeply nested object structures that models frequently mangled, producing invalid tool calls or corrupted files.
+
 ### Added
 
 - New LLM-exposed endpoint `/files/replace-lines` (`operation_id="replace_lines"`) for deterministic line-range edits. It replaces lines `[start_line..end_line]` with `new_content`, supporting block replace, insert-before (single-line range), and delete (empty `new_content`). An optional `expect` field acts as a drift guard: if provided, the edit aborts when the live file's lines differ from `expect`, protecting against stale line numbers that previously caused subtle corruption.
