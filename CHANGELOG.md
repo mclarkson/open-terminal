@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `replace_file_content` now rejects empty `target`/`old_text` strings (HTTP 400), preventing silent corruption from replacing every position in a file.
 - `replace_lines` no longer merges the last inserted line into the next existing line. Inserted lines are now given the file's dominant line terminator (CRLF or LF) detected from the surrounding lines, so multi-line `new_content` without a trailing newline no longer glues onto the following line.
 - `replace_lines` now preserves whether the file ends with a trailing newline: when replacing the last line(s) of a file that has no trailing newline, the last inserted line is left bare instead of introducing a newline some linters/parsers reject.
 
