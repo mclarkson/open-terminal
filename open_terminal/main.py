@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import hmac
 from importlib.metadata import version as _pkg_version
 import fnmatch
@@ -290,7 +291,34 @@ class SimpleReplaceRequest(BaseModel):
         False,
         description="If true, replaces all occurrences. If false, errors when multiple matches are found.",
     )
+    expect_hash: Optional[str] = Field(
+        None,
+        description="Optional SHA-256 hex digest of the file's content before the edit. The operation fails if the file has changed since this hash was computed, preventing stale-replace corruption.",
+    )
 
+
+class SimpleReplaceLinesRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description="Path to the file to modify.",
+    )
+    line_number: int = Field(
+        ...,
+        ge=1,
+        description="Line number to replace (1-indexed). Use len(lines)+1 to append after last line.",
+    )
+    new_content: str = Field(
+        "",
+        description="Replacement text. An empty string deletes the line.",
+    )
+    expect: Optional[str] = Field(
+        None,
+        description="Optional expected current content of the target line. When provided, the edit aborts if the live file differs, protecting against stale line numbers.",
+    )
+    expect_hash: Optional[str] = Field(
+        None,
+        description="Optional SHA-256 hex digest of the file's content before the edit. The operation fails if the file has changed since this hash was computed, preventing stale-replace corruption.",
+    )
 
 class MkdirRequest(BaseModel):
     path: str = Field(
@@ -864,38 +892,38 @@ async def replace_file_content(http_request: Request, request: SimpleReplaceRequ
     except OSError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    for chunk in request.replacements:
-        if not chunk.target:
+    # Drift guard: if caller provided an expected hash, verify the file hasn't changed.
+    if request.expect_hash is not None:
+        current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if current_hash != request.expect_hash:
             raise HTTPException(
-                status_code=400,
-                detail="Target string must not be empty",
-            )
-        if chunk.start_line or chunk.end_line:
-            lines = content.splitlines(keepends=True)
-            start = (chunk.start_line or 1) - 1
-            end = chunk.end_line or len(lines)
-            search_region = "".join(lines[start:end])
-        else:
-            search_region = content
-
-        count = search_region.count(chunk.target)
-        if count == 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Target string not found: {chunk.target[:100]!r}",
-            )
-        if count > 1 and not chunk.allow_multiple:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Found {count} occurrences of target string but allow_multiple is false",
+                status_code=409,
+                detail=(
+                    f"File changed since last read (stale replacement). "
+                    f"Expected hash {request.expect_hash!r}, got {current_hash!r}. "
+                    f"Re-read the file, refresh the old_text, and retry."
+                ),
             )
 
-        if chunk.start_line or chunk.end_line:
-            new_region = search_region.replace(chunk.target, chunk.replacement)
-            lines[start:end] = [new_region]
-            content = "".join(lines)
-        else:
-            content = content.replace(chunk.target, chunk.replacement)
+    if not request.old_text:
+        raise HTTPException(
+            status_code=400,
+            detail="Target string must not be empty",
+        )
+
+    count = content.count(request.old_text)
+    if count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target string not found: {request.old_text[:100]!r}",
+        )
+    if count > 1 and not request.allow_multiple:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Found {count} occurrences of target string but allow_multiple is false",
+        )
+
+    content = content.replace(request.old_text, request.new_text)
 
     try:
         await fs.write(target, content)
@@ -936,6 +964,19 @@ async def replace_lines(
         content = await fs.read_text(target)
     except OSError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Drift guard: verify the file hasn't changed since the caller read it.
+    if request.expect_hash is not None:
+        current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if current_hash != request.expect_hash:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"File changed since last read (stale replacement). "
+                    f"Expected hash {request.expect_hash!r}, got {current_hash!r}. "
+                    f"Re-read the file and retry."
+                ),
+            )
 
     lines = content.splitlines(keepends=True)
 
