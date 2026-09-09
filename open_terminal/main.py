@@ -291,9 +291,16 @@ class SimpleReplaceRequest(BaseModel):
         False,
         description="If true, replaces all occurrences. If false, errors when multiple matches are found.",
     )
-    expect_hash: Optional[str] = Field(
-        None,
-        description="Optional SHA-256 hex digest of the file's content before the edit. The operation fails if the file has changed since this hash was computed, preventing stale-replace corruption.",
+    expect_hash: str = Field(
+        ...,
+        description="SHA-256 hex digest of the file content from the last read. Required — prevents stale-replace corruption by rejecting edits when the file has changed between read and write.",
+    )
+
+
+class ComputeHashRequest(BaseModel):
+    text: str = Field(
+        ...,
+        description="The text to compute the SHA-256 hash of.",
     )
 
 
@@ -315,10 +322,11 @@ class SimpleReplaceLinesRequest(BaseModel):
         None,
         description="Optional expected current content of the target line. When provided, the edit aborts if the live file differs, protecting against stale line numbers.",
     )
-    expect_hash: Optional[str] = Field(
-        None,
-        description="Optional SHA-256 hex digest of the file's content before the edit. The operation fails if the file has changed since this hash was computed, preventing stale-replace corruption.",
+    expect_hash: str = Field(
+        ...,
+        description="SHA-256 hex digest of the file content from the last read. Required — prevents stale-replace corruption by rejecting edits when the file has changed between read and write.",
     )
+
 
 class MkdirRequest(BaseModel):
     path: str = Field(
@@ -1037,6 +1045,21 @@ async def replace_lines(
         "inserted_lines": len(new_lines),
         "new_total_lines": len(lines),
     }
+
+
+@app.post(
+    "/files/compute-hash",
+    operation_id="compute_hash",
+    summary="Compute SHA-256 hash of text",
+    description="Compute and return the SHA-256 hex digest of the provided text. Use this to generate an expect_hash value for replace_file_content or replace_lines, preventing stale-replace corruption.",
+    dependencies=[Depends(verify_api_key)],
+    responses={
+        401: {"description": "Invalid or missing API key."},
+    },
+)
+async def compute_hash(request: ComputeHashRequest):
+    digest = hashlib.sha256(request.text.encode("utf-8")).hexdigest()
+    return {"hash": digest}
 
 
 @app.get(
