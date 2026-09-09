@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 from open_terminal.env import API_KEY, BINARY_FILE_MIME_PREFIXES, CORS_ALLOWED_ORIGINS, ENABLE_NOTEBOOKS, ENABLE_SYSTEM_PROMPT, ENABLE_TERMINAL, EXECUTE_DESCRIPTION, EXECUTE_TIMEOUT, FILE_BROWSER_ROOT, LOG_DIR, MAX_TERMINAL_SESSIONS, MULTI_USER, OPEN_TERMINAL_INFO, PROCESS_LOG_RETENTION, SESSION_CWD_TTL, SYSTEM_PROMPT, TERMINAL_COLS, TERMINAL_ROWS, TERMINAL_TERM
 from open_terminal.utils.runner import PipeRunner, ProcessRunner, create_runner
 from open_terminal.utils.fs import UserFS
+from open_terminal.utils.diff_parser import parse_unified_diff, apply_diff
 
 MATCH_PAGE_SIZE = 100
 MAX_CONTENT_MATCHES_PER_FILE = 3
@@ -344,32 +345,6 @@ class MoveRequest(BaseModel):
         ...,
         description="Destination path (new location).",
     )
-
-
-class ReplaceLinesRequest(BaseModel):
-    path: str = Field(
-        ...,
-        description="Path to the file to modify.",
-    )
-    start_line: int = Field(
-        ...,
-        ge=1,
-        description="First line to replace (1-indexed, inclusive).",
-    )
-    end_line: int = Field(
-        ...,
-        ge=1,
-        description="Last line to replace (1-indexed, inclusive).",
-    )
-    new_content: str = Field(
-        "",
-        description="Replacement text for the range. An empty string deletes the range.",
-    )
-    expect: Optional[str] = Field(
-        None,
-        description="Optional expected current content of lines [start_line..end_line]. When provided, the edit aborts if the live file's lines differ, protecting against stale line numbers.",
-    )
-
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +863,7 @@ async def _post_edit_check(fs, target: str) -> None:
         401: {"description": "Invalid or missing API key."},
     },
 )
+
 async def replace_file_content(http_request: Request, request: SimpleReplaceRequest, fs: UserFS = Depends(get_filesystem)):
     session_id = http_request.headers.get("x-session-id")
     session_cwd = _get_session_cwd(session_id, fs) if session_id else None
@@ -939,6 +915,8 @@ async def replace_file_content(http_request: Request, request: SimpleReplaceRequ
         raise HTTPException(status_code=400, detail=str(e))
     await _post_edit_check(fs, target)
     return {"path": target, "size": len(content.encode())}
+
+
 @app.post(
     "/files/replace-lines",
     operation_id="replace_lines",
@@ -1060,6 +1038,113 @@ async def replace_lines(
 async def compute_hash(request: ComputeHashRequest):
     digest = hashlib.sha256(request.text.encode("utf-8")).hexdigest()
     return {"hash": digest}
+
+
+class DiffApplyRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description="Absolute or relative path to the file to patch.",
+    )
+    diff_text: str = Field(
+        ...,
+        description=(
+            "A unified diff (patch) to apply atomically. Supports multiple hunks. "
+            "The @@ headers specify line numbers in 1-indexed format. "
+            "Lines prefixed with '+' are additions, '-' are deletions, ' ' are context."
+        ),
+    )
+    expect_hash: Optional[str] = Field(
+        None,
+        description=(
+            "SHA-256 hex digest of the file content from the last read. "
+            "If provided and differs from current file hash, the operation is rejected "
+            "(HTTP 409). Use this to prevent stale-diff corruption."
+        ),
+    )
+
+
+@app.post(
+    "/files/apply-diff",
+    operation_id="apply_diff",
+    summary="Apply a unified diff (patch) to a file",
+    description=(
+        "Atomically apply a unified diff patch to a file. The diff is parsed into "
+        "hunks, each hunk's old content is verified against the live file before applying, "
+        "and all hunks are applied in reverse order so earlier line numbers stay valid. "
+        "If any hunk fails to match, the entire operation is aborted — no partial edits."
+    ),
+    dependencies=[Depends(verify_api_key)],
+    responses={
+        404: {"description": "File not found."},
+        400: {"description": "Invalid diff or mismatch."},
+        401: {"description": "Invalid or missing API key."},
+        409: {"description": "File changed since last read (stale diff)."},
+    },
+)
+async def apply_diff_endpoint(
+    http_request: Request,
+    request: DiffApplyRequest,
+    fs: UserFS = Depends(get_filesystem),
+):
+    session_id = http_request.headers.get("x-session-id")
+    session_cwd = _get_session_cwd(session_id, fs) if session_id else None
+    target = fs.resolve_path(request.path, cwd=session_cwd)
+    if not await fs.isfile(target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        content = await fs.read_text(target)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Drift guard: verify the file hasn't changed since the caller read it.
+    current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if request.expect_hash is not None:
+        if request.expect_hash != current_hash:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"File changed since last read (stale diff). "
+                    f"Expected hash {request.expect_hash!r}, got {current_hash!r}. "
+                    f"Re-read the file and retry."
+                ),
+            )
+
+    # Parse the diff
+    try:
+        diff_result = parse_unified_diff(request.diff_text)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to parse diff: {exc}",
+        )
+
+    if not diff_result.hunks:
+        raise HTTPException(
+            status_code=400,
+            detail="No hunks found in diff text",
+        )
+
+    # Apply the diff
+    try:
+        new_content = apply_diff(content, diff_result)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Diff application failed: {exc}",
+        )
+
+    try:
+        await fs.write(target, new_content)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await _post_edit_check(fs, target)
+
+    return {
+        "path": target,
+        "size": len(new_content.encode()),
+        "hunks_applied": len(diff_result.hunks),
+    }
 
 
 @app.get(
