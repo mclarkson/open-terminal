@@ -299,22 +299,7 @@ class SimpleReplaceRequest(BaseModel):
 
 
 class ComputeHashRequest(BaseModel):
-    text: Optional[str] = Field(
-        None,
-        description="The text to compute the SHA-256 hash of. Mutually exclusive with `path` — provide one or the other.",
-    )
-    path: Optional[str] = Field(
-        None,
-        description="File path to read and compute the SHA-256 hash of. Mutually exclusive with `text`. Returns the hash of the file's actual on-disk content.",
-    )
-
-    @model_validator(mode="after")
-    def validate_input(self):
-        if self.text is None and self.path is None:
-            raise ValueError("Provide exactly one of `text` or `path`.")
-        if self.text is not None and self.path is not None:
-            raise ValueError("Provide exactly one of `text` or `path`, not both.")
-        return self
+    path: str = Field(..., description="File path to read and compute the SHA-256 hash of.")
 
 
 class SimpleReplaceLinesRequest(BaseModel):
@@ -1054,25 +1039,22 @@ async def replace_lines(
 @app.post(
     "/files/compute-hash",
     operation_id="compute_hash",
-    summary="Compute SHA-256 hash of text",
-    description="Compute and return the SHA-256 hex digest of the provided text. Use this to generate an expect_hash value for replace_file_content or replace_lines, preventing stale-replace corruption.",
+    summary="Compute SHA-256 hash of a file",
+    description="Compute and return the SHA-256 hex digest of the file at the given path. Use this to generate an expect_hash value for replace_file_content or replace_lines, preventing stale-replace corruption.",
     dependencies=[Depends(verify_api_key)],
     responses={
         401: {"description": "Invalid or missing API key."},
     },
 )
 async def compute_hash(request: ComputeHashRequest):
-    if request.path is not None:
-        try:
-            with open(request.path, "rb") as f:
-                data = f.read()
-            digest = hashlib.sha256(data).hexdigest()
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"File not found: {request.path}")
-        except PermissionError:
-            raise HTTPException(status_code=403, detail=f"Permission denied: {request.path}")
-    else:
-        digest = hashlib.sha256(request.text.encode("utf-8")).hexdigest()
+    try:
+        with open(request.path, "rb") as f:
+            data = f.read()
+        digest = hashlib.sha256(data).hexdigest()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"File not found: {request.path}")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {request.path}")
     return {"hash": digest}
 
 
