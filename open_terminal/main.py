@@ -631,10 +631,17 @@ async def read_file(
                 lines = text.splitlines(keepends=True)
                 start = (start_line or 1) - 1
                 end = end_line or len(lines)
+                # Compute hash from raw file bytes.
+                try:
+                    with open(target, "rb") as fh:
+                        doc_hash = hashlib.sha256(fh.read()).hexdigest()
+                except OSError:
+                    doc_hash = None
                 return {
                     "path": target,
                     "total_lines": len(lines),
                     "content": "".join(lines[start:end]),
+                    "hash": doc_hash,
                 }
 
         # Return raw binary for allowed mime type prefixes (e.g. image/*)
@@ -649,10 +656,17 @@ async def read_file(
 
     start = (start_line or 1) - 1
     end = end_line or len(lines)
+    # Compute hash from raw file bytes so it matches what replace/apply-diff use.
+    try:
+        with open(target, "rb") as fh:
+            file_hash = hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        file_hash = None
     return {
         "path": target,
         "total_lines": len(lines),
         "content": "".join(lines[start:end]),
+        "hash": file_hash,
     }
 
 
