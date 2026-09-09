@@ -299,10 +299,22 @@ class SimpleReplaceRequest(BaseModel):
 
 
 class ComputeHashRequest(BaseModel):
-    text: str = Field(
-        ...,
-        description="The text to compute the SHA-256 hash of.",
+    text: Optional[str] = Field(
+        None,
+        description="The text to compute the SHA-256 hash of. Mutually exclusive with `path` — provide one or the other.",
     )
+    path: Optional[str] = Field(
+        None,
+        description="File path to read and compute the SHA-256 hash of. Mutually exclusive with `text`. Returns the hash of the file's actual on-disk content.",
+    )
+
+    @model_validator(mode="after")
+    def validate_input(self):
+        if self.text is None and self.path is None:
+            raise ValueError("Provide exactly one of `text` or `path`.")
+        if self.text is not None and self.path is not None:
+            raise ValueError("Provide exactly one of `text` or `path`, not both.")
+        return self
 
 
 class SimpleReplaceLinesRequest(BaseModel):
@@ -1036,7 +1048,17 @@ async def replace_lines(
     },
 )
 async def compute_hash(request: ComputeHashRequest):
-    digest = hashlib.sha256(request.text.encode("utf-8")).hexdigest()
+    if request.path is not None:
+        try:
+            with open(request.path, "rb") as f:
+                data = f.read()
+            digest = hashlib.sha256(data).hexdigest()
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"File not found: {request.path}")
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=f"Permission denied: {request.path}")
+    else:
+        digest = hashlib.sha256(request.text.encode("utf-8")).hexdigest()
     return {"hash": digest}
 
 
