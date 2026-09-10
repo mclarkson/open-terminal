@@ -111,7 +111,13 @@ def get_system_prompt() -> str:
         "and search the filesystem. "
         "Prefer verifying the current state before making changes. "
         "When running commands, check the output to confirm success. "
-        "If a command produces no output, that typically means it succeeded."
+        "If a command produces no output, that typically means it succeeded.\n\n"
+        "**File editing: always use `ex`.**\n"
+        "- Read first with `read_file`, then edit with `ex(path, commands, expect_hash=<sha256>)`\n"
+        "- `ex` chains all commands in one invocation — no re-read needed between edits\n"
+        "- Each `ex` response returns updated content + new SHA-256 for chaining\n"
+        "- Use `sed` only for quick one-offs; prefer `ex` for anything >1 change\n"
+        "- Do NOT use Python scripts or diffs for simple edits — `ex` is faster and safer"
     )
 
     if OPEN_TERMINAL_INFO:
@@ -341,6 +347,117 @@ class MoveRequest(BaseModel):
     destination: str = Field(
         ...,
         description="Destination path (new location).",
+    )
+
+
+class ExRequest(BaseModel):
+    path: str = Field(..., description="Path to the file to edit.")
+    commands: str = Field(
+        ...,
+        description=(
+            "ex commands (one per line). See `ed` man page for syntax.\n"
+            "**Key patterns:**\n"
+            "- `s/pattern/replacement/` — substitute\n"
+            "- Preserve indentation: `Ns/\\(\\t*\\)old/\\1new/`\n"
+            "- `/regex/+N` or `/regex/-N` — relative addresses\n"
+            "- `wq` at end to write and quit\n"
+            "- All commands run in one invocation; no re-read needed between them\n"
+            "- Chain multiple edits freely"
+        ),
+    )
+    expect_hash: str = Field(
+        ...,
+        description=(
+            "SHA-256 hex digest of the file content. Must match current file hash. "
+            "Get this from read_file or the previous ex response. Prevents stale edits."
+        ),
+    )
+
+
+class ExResponse(BaseModel):
+    path: str
+    sha256: str
+    changed: bool
+    content: str  # full file content after edits
+
+
+@app.post(
+    "/files/ex",
+    operation_id="ex",
+    summary="Edit a file using ex commands",
+    description=(
+        "Run ex -s on the file. All commands execute in a single invocation against "
+        "the same in-memory copy — ideal for multi-step edits without re-reading. "
+        "Requires expect_hash from a prior read_file or ex response. Returns updated "
+        "content and new SHA-256 so subsequent edits chain without extra round-trips."
+    ),
+    dependencies=[Depends(verify_api_key)],
+    responses={
+        404: {"description": "File not found."},
+        409: {"description": "File changed since last read (stale hash)."},
+        400: {"description": "Invalid ex command."},
+        401: {"description": "Invalid or missing API key."},
+    },
+)
+async def ex_endpoint(
+    http_request: Request,
+    request: ExRequest,
+    fs: UserFS = Depends(get_filesystem),
+):
+    session_id = http_request.headers.get("x-session-id")
+    session_cwd = _get_session_cwd(session_id, fs) if session_id else None
+    target = fs.resolve_path(request.path, cwd=session_cwd)
+    if not await fs.isfile(target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        content = await fs.read_text(target)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Drift guard
+    current_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if request.expect_hash != current_hash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"File changed since last read (stale hash). "
+                f"Expected {request.expect_hash!r}, got {current_hash!r}. "
+                f"Re-read the file and retry."
+            ),
+        )
+
+    # Run ex -s with the provided commands (ensure trailing newline)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ex", "-s", target],
+            input=request.commands + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=400, detail="ex timed out")
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise HTTPException(status_code=400, detail=f"ex failed: {stderr}")
+
+    # Read back the file (ex writes it via wq internally)
+    try:
+        new_content = await fs.read_text(target)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+    changed = new_hash != current_hash
+
+    return ExResponse(
+        path=target,
+        sha256=new_hash,
+        changed=changed,
+        content=new_content,
     )
 
 
@@ -864,6 +981,7 @@ async def _post_edit_check(fs, target: str) -> None:
         )
 @app.post(
     "/files/replace",
+    include_in_schema=False,
     operation_id="replace_file_content",
     summary="Replace content in a file",
     description="Find and replace exact strings in a file. Supports multiple replacements in one call.",
@@ -930,6 +1048,7 @@ async def replace_file_content(http_request: Request, request: SimpleReplaceRequ
 
 @app.post(
     "/files/replace-lines",
+    include_in_schema=False,
     operation_id="replace_lines",
     summary="Replace a line in a file",
     description=(
@@ -1083,6 +1202,7 @@ class DiffApplyRequest(BaseModel):
 
 @app.post(
     "/files/apply-diff",
+    include_in_schema=False,
     operation_id="apply_diff",
     summary="Apply a unified diff (patch) to a file",
     description=(
